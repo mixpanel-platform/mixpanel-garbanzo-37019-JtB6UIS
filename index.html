@@ -5,11 +5,481 @@
     <link rel="stylesheet" type="text/css" href="https://cdn.mxpnl.com/libs/mixpanel-platform/css/reset.css">
     <link rel="stylesheet" type="text/css" href="https://cdn.mxpnl.com/libs/mixpanel-platform/build/mixpanel-platform.v0.latest.min.css">
     <script src="https://cdn.mxpnl.com/libs/mixpanel-platform/build/mixpanel-platform.v0.latest.min.js"></script>
+    <script type-"text/javascript" src="https://cdn.rawgit.com/tmcw/simple-statistics/master/src/simple_statistics.js"></script>
   </head>
   <body class="mixpanel-platform-body">
-    <h1>Hello, World!</h1>
+    <h1>A/B Tests</h1>
+    <div id="date-picker"></div>
+    <h3 class="load">Loading...</h3>
+    <div id="experiments"></div>
+    <style>
+      body {
+        color: rgb(95,105,131);
+      }
+      h1 {
+        font-size: 25px;
+        margin-bottom: 20px;
+      }
+      h2 {
+        font-size: 22px;
+        margin: 30px 0 10px;
+        color: black;
+      }
+      h3 {
+        font-size: 15px;
+        margin-bottom: 10px;
+      }
+      #date-picker {
+        margin-bottom: 20px;
+      }
+      .table, .chart {
+        margin-bottom: 20px;
+      }
+      .bold {
+        font-weight: bold;
+      }
+    </style>
     <script>
-      // Run queries and display results here
+
+      // only necessary if developing/hosting locally
+      MP.api.setCredentials('938b213e7fdb1e493fb704cbc066ec18', 'bb3fe8b06610ac5447f5421d7ef6e8bf');
+
+      // populate date picker dropdown
+      $('#date-picker').MPDatepicker();
+
+      function runQuery() {
+        $('.load').show();
+
+        // grab date range from date picker
+        var dateSelect = $('#date-picker').val();
+
+        var experimentList = [],
+            statsObject = {};
+
+        // query for top property values of checkout event to find all experiments
+        MP.api.topProperties('checkout step thank you').done(function(results) {
+          var topProps = results.values();
+          for (var prop in topProps) {
+            if ( prop.indexOf('exp:') == 0 ) {
+              experimentList.push(prop);
+            }
+          }
+          
+          // initialize lists of promises so that nothing is graphed until all queries are complete
+          var orderPromises = [],
+              orderCountPromises = [],
+              returnPromises = [],
+              newPromises = [];
+
+          // create div for each experiment
+          for (var experiment in experimentList) {
+            $('<div id="' + experiment + '"></div>').appendTo($('#experiments'));
+
+            // find average order value for each experiment's variants
+            var orderParameters = {
+              event: 'checkout step thank you',
+              type: 'general',
+              where: '"place" in string(properties["checkoutType"])',
+              inner: 'properties["totalCheckoutValue"]',
+              outer: 'properties["' + experimentList[experiment] + '"]',
+              action: 'average',
+              unit: 'day',
+              limit: 255,
+              from: dateSelect.from,
+              to: dateSelect.to
+            }
+            var orderPromise = new Promise(function(resolve, reject) {
+              MP.api.query('api/2.0/segmentation/multiseg', orderParameters).done(function(json) {
+                resolve(json);
+              });
+            });
+            orderPromises.push(orderPromise);
+
+            // find total number of orders (to be used to calculate significance of difference in average values)
+            var orderCountPromise = new Promise(function(resolve, reject) {
+              MP.api.segment('checkout step thank you', experimentList[experiment]).done(function(json) {
+                resolve(json);
+              });              
+            });
+            orderCountPromises.push(orderCountPromise);
+
+            // find returning customer conversion rates for each experiment's variants
+            var returnParameters = {
+              segment: experimentList[experiment],
+              from: dateSelect.from,
+              to: dateSelect.to
+            }
+            var returnPromise = new Promise(function(resolve, reject) {
+              MP.api.funnel({event: 'Market Page View', selector: 'boolean(properties["isRegistered"]) == true'}, 'checkout step thank you', returnParameters).done(function(json) {
+                resolve(json);
+              });
+            });
+            returnPromises.push(returnPromise);
+
+            // find new customer conversion rates for each experiment's variants
+            var newParameters = {
+              segment: experimentList[experiment],
+              from: dateSelect.from,
+              to: dateSelect.to
+            }
+            var newPromise = new Promise(function(resolve, reject) {
+              MP.api.funnel({event: 'Market Page View', selector: 'boolean(properties["isRegistered"]) == false'}, 'checkout step thank you', returnParameters).done(function(json) {
+                resolve(json);
+              });
+            });
+            newPromises.push(newPromise);
+
+          }
+
+          // after all queries have been made, add each graph and a table to experiment section
+          var tableObject = {},
+              statsObject = {};
+
+          // when average checkout order queries are complete:
+          Promise.all(orderPromises).then(function(data) {
+            for (var promise in data) {
+              var results = data[promise].data.values;
+
+              $('<br><hr>').appendTo($('#' + promise));
+              $('<h2></h2>').appendTo($('#' + promise)).text(experimentList[promise]);
+              $('<h3></h3>').appendTo($('#' + promise)).text('Average Checkout Value');
+
+              // create and append average order graph
+              tableObject[experimentList[promise]] = {}
+              $('<div class="chart"></div>').appendTo($('#' + promise)).MPChart({
+                chartType: 'line',
+                data: results
+              });
+
+              statsObject[promise] = {'Average Checkout Value': {'$overall': []}};
+              // find overall averages of checkout orders for each experiment variant for summary table
+              var allAverages = {};
+
+              for (variant in results) {
+                allAverages[variant] = {};
+                statsObject[promise]['Average Checkout Value'][variant] = [];
+                for (var date in results[variant]) {
+                  if (results[variant][date]) {
+                    allAverages[variant][date] = results[variant][date]
+                    statsObject[promise]['Average Checkout Value'][variant].push(results[variant][date]);
+                    statsObject[promise]['Average Checkout Value']['$overall'].push(results[variant][date]);
+                  }
+                }
+
+                var average = MP.Data.inst(allAverages[variant]).avg().values();
+                tableObject[experimentList[promise]][variant] = {'Average Checkout Value': average};
+              }
+              // find overall average of all checkout orders in experiment
+              var totalAverage = MP.Data.inst(allAverages).avg().avg().values();
+              tableObject[experimentList[promise]]['$overall'] = {'Average Checkout Value': totalAverage};
+            }
+
+            // when returning user conversion queries are complete:
+            Promise.all(returnPromises).then(function(data) {
+              for (var promise in data) {
+                var results = data[promise];
+
+                $('<h3></h3>').appendTo($('#' + promise)).text('~Returning User Conversion');
+
+                // create and append returning user conversion graph
+                var returnObject = {},
+                    conversionObject = {};
+                statsObject[promise]['~Returning User Conversion'] = {};
+                for (var variant in results ) {
+                  returnObject[variant] = {},
+                  conversionObject[variant] = {'Total': 0, 'Converted': 0};
+                  statsObject[promise]['~Returning User Conversion'][variant] = 0;
+                  for (var date in results[variant]) {
+                    if (results[variant][date][0].count) {
+                      returnObject[variant][date] = results[variant][date][1].overall_conv_ratio;
+                      conversionObject[variant]['Total'] += results[variant][date][0].count;
+                      conversionObject[variant]['Converted'] += results[variant][date][1].count;
+                      statsObject[promise]['~Returning User Conversion'][variant] += results[variant][date][0].count;
+                    }
+                  }
+                }
+                $('<div class="chart"></div>').appendTo($('#' + promise)).MPChart({
+                  chartType: 'line',
+                  data: returnObject
+                });
+
+                // check to make sure experiment variant exists in summary table and find overall averages for each
+                for (var variant in returnObject) {
+                  if ((tableObject[experimentList[promise]]).hasOwnProperty(variant)) {
+                    $.noop();
+                  }
+                  else {
+                    tableObject[experimentList[promise]][variant] = {'Average Checkout Value': 'N/A'};
+                  }
+                  var average = conversionObject[variant]['Converted'] / conversionObject[variant]['Total'];
+                  tableObject[experimentList[promise]][variant]['~Returning User Conversion'] = average;
+                }
+              }
+              // when new user conversion queries are complete:
+              Promise.all(newPromises).then(function(data) {
+                for (var promise in data) {
+                  var results = data[promise];
+
+                  $('<h3></h3>').appendTo($('#' + promise)).text('~~New User Conversion');
+
+                  // create and append new user conversion graph
+                  var newObject = {},
+                      conversionObject = {};
+                  statsObject[promise]['~~New User Conversion'] = {};
+                  for (var variant in results) {
+                    newObject[variant] = {},
+                    conversionObject[variant] = {'Total': 0, 'Converted': 0};
+                    statsObject[promise]['~~New User Conversion'][variant] = 0;
+                    for (var date in results[variant]) {
+                      if (results[variant][date][0].count) {
+                        newObject[variant][date] = results[variant][date][1].overall_conv_ratio;
+                        conversionObject[variant]['Total'] += results[variant][date][0].count;
+                        conversionObject[variant]['Converted'] += results[variant][date][1].count;
+                        statsObject[promise]['~~New User Conversion'][variant] += results[variant][date][0].count;
+                      }
+                    }
+                  }
+                  $('<div class="chart"></div>').appendTo($('#' + promise)).MPChart({
+                    chartType: 'line',
+                    data: returnObject
+                  });
+
+                  // check to make sure experiment variant exists in summary table and find overall averages for each
+                  for (var variant in newObject) {
+                    if ((tableObject[experimentList[promise]]).hasOwnProperty(variant)) {
+                      $.noop();
+                    }
+                    else {
+                      tableObject[experimentList[promise]][variant] = {'Average Checkout Value': 'N/A', '~Returning User Conversion': 'N/A'};
+                    }
+                    var average = conversionObject[variant]['Converted'] / conversionObject[variant]['Total'];
+                    tableObject[experimentList[promise]][variant]['~~New User Conversion'] = average;
+                  }
+                }
+
+                // loop through table object and calculate stats, then append summary tables for each experiment
+                var id = 0;
+                var numExperiments = Object.keys(tableObject).length;
+                while (id < numExperiments) {
+                  for (var experiment in tableObject) {
+                    for (var variant in tableObject[experiment]) {
+                      if ( tableObject[experiment].hasOwnProperty('undefined') ) {
+                        for (var test in tableObject[experiment][variant]) {
+                          var calculation = (test == 'Average Checkout Value') ? ' Significance' : ' ~CTBO';
+                          if (variant != 'undefined' && variant != '$overall') {
+                            if (test == 'Average Checkout Value') {
+                              // define samples for two sided t test
+                              var list0 = statsObject[id][test]['undefined'],
+                                  list1 = statsObject[id][test][variant],
+                                  avg0 = MP.Data.inst(list0).avg().values(),
+                                  avg1 = MP.Data.inst(list1).avg().values();
+                              if (list0 && list1) {
+                                var df = (list0.length + list1.length - 2 > 0) ? (list0.length + list1.length - 2) : undefined,
+                                    X = ss.t_test_two_sample(list0, list1);
+                                var stats = calcStats(undefined, avg0, undefined, avg1, compute(X, df));
+                              }
+                              else {
+                                var stats = calcStats(undefined, avg0, undefined, avg1);
+                              }
+                            }
+                            else {
+                              // define baseline and variant test values and sample sizes
+                              var conv0 = tableObject[experiment]['undefined'][test],
+                                  conv1 = tableObject[experiment][variant][test],
+                                  total0 = statsObject[id][test]['undefined'],
+                                  total1 = statsObject[id][test][variant];
+                              // calculate improvement and statistical significance of variant
+                              var stats = calcStats(total0, conv0, total1, conv1);
+                            }
+                            // populate table values
+                            tableObject[experiment][variant][test + ' Improvement'] = stats[0];
+                            tableObject[experiment][variant][test + calculation] = stats[2];
+                            if (stats[3] != '--' && stats[2] != 'N/A') {
+                              tableObject[experiment][variant][test + calculation] += ' (' + stats[3] + ')';
+                            }
+                          }
+
+                          // improvement and significance not relevant for baseline or overall
+                          else if (variant == 'undefined') {
+                            tableObject[experiment]['undefined'][test + ' Improvement'] = 'N/A';
+                            tableObject[experiment]['undefined'][test + calculation] = 'N/A';
+                          }
+                          else if (variant == '$overall') {
+                            tableObject[experiment]['$overall'][test + ' Improvement'] = 'N/A';
+                            tableObject[experiment]['$overall'][test + calculation] = 'N/A';
+                          }
+
+                          // format table values
+                          if ( isNaN(tableObject[experiment][variant][test]) ) {
+                            $.noop();
+                          }
+                          else {
+                            if (test == 'Average Checkout Value') {
+                              tableObject[experiment][variant][test] = '$' + tableObject[experiment][variant][test].toFixed(2);
+                            }
+                            else {
+                              tableObject[experiment][variant][test] = (tableObject[experiment][variant][test]*100).toFixed(2) + '%';
+                            }
+                          }
+                        }
+                      }
+                    }
+
+                    // append table to experiment div
+                    $('<h3></h3>').appendTo($('#' + id)).text('Summary and Statistical Significance');
+                    $('<div class="table"></div>').appendTo($('#' + id)).MPTable({
+                      data: tableObject[experiment],
+                      firstColHeader: 'Experiment Variant'
+                    });
+                    id++;
+                  }
+                }
+
+                $('.load').hide();
+
+              });            
+            });
+          });
+        });
+      }
+
+      // calculate statistical significance for a given variant in relation to a baseline
+      function calcStats(total0, conv0, total1, conv1, chance) {
+
+        if ( isNaN(conv1) || isNaN(conv0) ) {
+          var variant_stats = ['N/A', '', 'N/A', '']
+        }
+        else if ( conv0 == 0 ) {
+          var variant_stats = ['Conversion of baseline cannot equal 0', '', 'N/A', ''];
+        }
+        else {
+          // calculate improvement over baseline
+          var improvement = (conv1 - conv0) / conv0;
+          if (isNaN(improvement) || improvement == Infinity) {
+            $.noop();
+          }
+          else {
+            improvement = (improvement > 0) ? '+' + (improvement * 100).toFixed(1) + '%' : (improvement * 100).toFixed(1) + '%';
+          }
+          
+          // calculate standard error, confidence interval, z score 
+          var se0 = Math.sqrt(conv0*(1-conv0)/total0),
+              se1 = Math.sqrt(conv1*(1-conv1)/total1),
+              ci = '(±' + (1.96 * se1).toFixed(2) + '%)',
+              zscore = ((conv1 - conv0) / Math.sqrt(Math.pow(se1,2) + Math.pow(se0,2))),
+              // the following is from http://picomath.org/javascript/phi.js.html
+              // constants
+              a1 = 0.254829592,
+              a2 = -0.284496736,
+              a3 =  1.421413741,
+              a4 = -1.453152027,
+              a5 =  1.061405429,
+              p  =  0.3275911;
+
+          // save the sign of zscore
+          var sign = 1;
+          if (zscore < 0) {
+            sign = -1
+          }
+          zscore = Math.abs(zscore)/Math.sqrt(2.0);
+          
+          var t = 1.0/(1.0 + p*zscore);
+          var y = 1.0 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1)*t*Math.exp(-zscore*zscore);
+          
+          var result = '--';
+
+          if (!chance) {
+            // calculate chance to beat baseline if applicable
+            chance = (isNaN(zscore)) ? '--' : 0.5*(1.0 + sign*y);
+            if (total1 < 10) {
+              chance = 'Sample size too small'
+            }
+            else if (chance >= 0.95) {
+              result = 'Win'
+            }
+            else if (chance <= 0.05) {
+              result = 'Lose'
+            }
+            else if (0.95 > chance > 0.05) {
+              result = 'Not Significant'
+            }
+          }
+            
+          if (isNaN(chance)) {
+            $.noop();
+          }
+          else {
+            chance = (chance * 100).toFixed(1) + '%';
+          }
+          
+          var variant_stats = [improvement, ci, chance, result];
+        }
+        
+        return variant_stats;
+      }
+
+      // the following 3 functions are from http://www.math.ucla.edu/~tom/distributions/tDist.html
+      // to calculate p value from t value and degrees of freedom
+      function LogGamma(Z) {
+        with (Math) {
+          var S=1+76.18009173/Z-86.50532033/(Z+1)+24.01409822/(Z+2)-1.231739516/(Z+3)+.00120858003/(Z+4)-.00000536382/(Z+5);
+          var LG= (Z-.5)*log(Z+4.5)-(Z+4.5)+log(S*2.50662827465);
+        }
+        return LG
+      }
+      function Betinc(X,A,B) {
+        var A0=0;
+        var B0=1;
+        var A1=1;
+        var B1=1;
+        var M9=0;
+        var A2=0;
+        var C9;
+        while (Math.abs((A1-A2)/A1)>.00001) {
+          A2=A1;
+          C9=-(A+M9)*(A+B+M9)*X/(A+2*M9)/(A+2*M9+1);
+          A0=A1+C9*A0;
+          B0=B1+C9*B0;
+          M9=M9+1;
+          C9=M9*(B-M9)*X/(A+2*M9-1)/(A+2*M9);
+          A1=A0+C9*A1;
+          B1=B0+C9*B1;
+          A0=A0/B1;
+          B0=B0/B1;
+          A1=A1/B1;
+          B1=1;
+        }
+        return A1/A
+      }
+      function compute(X, df) {
+          with (Math) {
+            A=df/2;
+            S=A+.5;
+            Z=df/(df+X*X);
+            BT=exp(LogGamma(S)-LogGamma(.5)-LogGamma(A)+A*log(Z)+.5*log(1-Z));
+            if (Z<(A+1)/(S+2)) {
+              betacdf=BT*Betinc(Z,A,.5)
+            } else {
+              betacdf=1-BT*Betinc(1-Z,.5,A)
+            }
+            if (X<0) {
+              tcdf=betacdf/2
+            } else {
+              tcdf=1-betacdf/2
+            }
+          tcdf=round(tcdf*100000)/100000;
+        }
+        return tcdf;
+      }
+
+      // run query when report is loaded
+      runQuery();
+
+      // run query if date selector is changed
+      $('#date-picker').on('change', function() {
+        runQuery();
+      })
+  
     </script>
   </body>
 </html>
