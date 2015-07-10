@@ -5,7 +5,7 @@
     <link rel="stylesheet" type="text/css" href="https://cdn.mxpnl.com/libs/mixpanel-platform/css/reset.css">
     <link rel="stylesheet" type="text/css" href="https://cdn.mxpnl.com/libs/mixpanel-platform/build/mixpanel-platform.v0.latest.min.css">
     <script src="https://cdn.mxpnl.com/libs/mixpanel-platform/build/mixpanel-platform.v0.latest.min.js"></script>
-    <script type-"text/javascript" src="https://cdn.rawgit.com/tmcw/simple-statistics/master/src/simple_statistics.js"></script>
+    <script type="text/javascript" src="https://cdn.rawgit.com/tmcw/simple-statistics/master/src/simple_statistics.js"></script>
   </head>
   <body class="mixpanel-platform-body">
     <h1>A/B Tests</h1>
@@ -41,6 +41,21 @@
     </style>
     <script>
 
+    	var experimentBaselines = {
+    		'exp:delayed-signup' : 'off',
+    		'exp:hide-first-packaging' : 'off',
+    		'exp:hover-subtotal' : 'hidden',
+    		'exp:no-op' : 'group-1',
+    		'exp:two-welcome-experiences' : 'page',
+    		'exp:welcome-page-zipentry' : 'control',
+    		'exp:bundles-nav' : 'variant0',
+    		'exp:welcome-experience' : 'page',
+    		'exp:sticky-date-filter' : 'A',
+    	};
+
+      // only necessary if developing/hosting locally
+      MP.api.setCredentials('938b213e7fdb1e493fb704cbc066ec18', 'bb3fe8b06610ac5447f5421d7ef6e8bf');
+
       // populate date picker dropdown
       $('#date-picker').MPDatepicker();
 
@@ -54,7 +69,7 @@
             statsObject = {};
 
         // query for top property values of checkout event to find all experiments
-        MP.api.topProperties('checkout step thank you').done(function(results) {
+        MP.api.topProperties('Market Page View').done(function(results) {
           var topProps = results.values();
           for (var prop in topProps) {
             if ( prop.indexOf('exp:') == 0 ) {
@@ -135,18 +150,28 @@
           // when average checkout order queries are complete:
           Promise.all(orderPromises).then(function(data) {
             for (var promise in data) {
-              var results = data[promise].data.values;
+              var results = data[promise].data.values,
+                  baselineText = (experimentBaselines[experimentList[promise]]) ? experimentBaselines[experimentList[promise]] : 'Error: Please specify a baseline for this experiment in the experimentBaselines object. Showing results for default baseline "off."';
 
               $('<br><hr>').appendTo($('#' + promise));
               $('<h2></h2>').appendTo($('#' + promise)).text(experimentList[promise]);
+             	$('<p></p>').appendTo($('#' + promise)).html('Baseline: <span class="bold">' + baselineText + '</span>').css('color', 'black');
               $('<h3></h3>').appendTo($('#' + promise)).text('Average Checkout Value');
 
-              // create and append average order graph
               tableObject[experimentList[promise]] = {}
-              $('<div class="chart"></div>').appendTo($('#' + promise)).MPChart({
-                chartType: 'line',
-                data: results
-              });
+
+              delete results['undefined'];
+
+              if (JSON.stringify(results) != '{}') {
+								// create and append average order graph
+	              $('<div class="chart"></div>').appendTo($('#' + promise)).MPChart({
+	                chartType: 'line',
+	                data: results
+	              });
+              }
+              else {
+              	$('<p></p>').appendTo($('#' + promise)).text('No "checkout step thank you" events with property "' + experimentList[promise] + '"');
+              }
 
               statsObject[promise] = {'Average Checkout Value': {'$overall': []}};
               // find overall averages of checkout orders for each experiment variant for summary table
@@ -195,6 +220,7 @@
                     }
                   }
                 }
+                delete returnObject['undefined'];
                 $('<div class="chart"></div>').appendTo($('#' + promise)).MPChart({
                   chartType: 'line',
                   data: returnObject
@@ -236,9 +262,10 @@
                       }
                     }
                   }
+                  delete newObject['undefined'];
                   $('<div class="chart"></div>').appendTo($('#' + promise)).MPChart({
                     chartType: 'line',
-                    data: returnObject
+                    data: newObject
                   });
 
                   // check to make sure experiment variant exists in summary table and find overall averages for each
@@ -259,67 +286,78 @@
                 var numExperiments = Object.keys(tableObject).length;
                 while (id < numExperiments) {
                   for (var experiment in tableObject) {
+
+                  	delete tableObject[experiment]['undefined']
+
+                  	// set baseline of experiment if defined, else set baseline to default: "off"
+	              		var baseline = (experimentBaselines[experimentList[id]]) ? experimentBaselines[experimentList[id]] : 'off';
+
                     for (var variant in tableObject[experiment]) {
-                      if ( tableObject[experiment].hasOwnProperty('undefined') ) {
-                        for (var test in tableObject[experiment][variant]) {
-                          var calculation = (test == 'Average Checkout Value') ? ' Significance' : ' ~CTBO';
-                          if (variant != 'undefined' && variant != '$overall') {
-                            if (test == 'Average Checkout Value') {
-                              // define samples for two sided t test
-                              var list0 = statsObject[id][test]['undefined'],
-                                  list1 = statsObject[id][test][variant],
-                                  avg0 = MP.Data.inst(list0).avg().values(),
-                                  avg1 = MP.Data.inst(list1).avg().values();
-                              if (list0 && list1) {
-                                var df = (list0.length + list1.length - 2 > 0) ? (list0.length + list1.length - 2) : undefined,
-                                    X = ss.t_test_two_sample(list0, list1);
-                                var stats = calcStats(undefined, avg0, undefined, avg1, compute(X, df));
-                              }
-                              else {
-                                var stats = calcStats(undefined, avg0, undefined, avg1);
-                              }
-                            }
-                            else {
-                              // define baseline and variant test values and sample sizes
-                              var conv0 = tableObject[experiment]['undefined'][test],
-                                  conv1 = tableObject[experiment][variant][test],
-                                  total0 = statsObject[id][test]['undefined'],
-                                  total1 = statsObject[id][test][variant];
-                              // calculate improvement and statistical significance of variant
-                              var stats = calcStats(total0, conv0, total1, conv1);
-                            }
-                            // populate table values
-                            tableObject[experiment][variant][test + ' Improvement'] = stats[0];
-                            tableObject[experiment][variant][test + calculation] = stats[2];
-                            if (stats[3] != '--' && stats[2] != 'N/A') {
-                              tableObject[experiment][variant][test + calculation] += ' (' + stats[3] + ')';
-                            }
-                          }
+	
+	                  	if ( tableObject[experiment].hasOwnProperty(baseline) ) {
+	                      for (var test in tableObject[experiment][variant]) {
+	                        var calculation = (test == 'Average Checkout Value') ? ' Significance' : ' ~CTBO';
+	                        if (variant != baseline && variant != '$overall') {
+	                          if (test == 'Average Checkout Value') {
+	                            // define samples for two sided t test
+	                            var list0 = statsObject[id][test][baseline],
+	                                list1 = statsObject[id][test][variant],
+	                                avg0 = MP.Data.inst(list0).avg().values(),
+	                                avg1 = MP.Data.inst(list1).avg().values();
+	                            if (list0 && list1) {
+	                              var df = (list0.length + list1.length - 2 > 0) ? (list0.length + list1.length - 2) : undefined,
+	                                  X = ss.t_test_two_sample(list0, list1);
+	                              var stats = calcStats(undefined, avg0, undefined, avg1, compute(X, df));
+	                            }
+	                            else {
+	                              var stats = calcStats(undefined, avg0, undefined, avg1);
+	                            }
+	                          }
+	                          else {
+	                            // define baseline and variant test values and sample sizes
+	                            var conv0 = tableObject[experiment][baseline][test],
+	                                conv1 = tableObject[experiment][variant][test],
+	                                total0 = statsObject[id][test][baseline],
+	                                total1 = statsObject[id][test][variant];
+	                            // calculate improvement and statistical significance of variant
+	                            var stats = calcStats(total0, conv0, total1, conv1);
+	                          }
+	                          // populate table values
+	                          tableObject[experiment][variant][test + ' Improvement'] = stats[0];
+	                          tableObject[experiment][variant][test + calculation] = stats[2];
+	                          if (stats[3] != '--' && stats[2] != 'N/A') {
+	                            tableObject[experiment][variant][test + calculation] += ' (' + stats[3] + ')';
+	                          }
+	                        }
 
-                          // improvement and significance not relevant for baseline or overall
-                          else if (variant == 'undefined') {
-                            tableObject[experiment]['undefined'][test + ' Improvement'] = 'N/A';
-                            tableObject[experiment]['undefined'][test + calculation] = 'N/A';
-                          }
-                          else if (variant == '$overall') {
-                            tableObject[experiment]['$overall'][test + ' Improvement'] = 'N/A';
-                            tableObject[experiment]['$overall'][test + calculation] = 'N/A';
-                          }
+	                        // improvement and significance not relevant for baseline or overall
+	                        else if (variant == baseline) {
+	                          tableObject[experiment][baseline][test + ' Improvement'] = 'N/A';
+	                          tableObject[experiment][baseline][test + calculation] = 'N/A';
+	                        }
+	                        else if (variant == '$overall') {
+	                          tableObject[experiment]['$overall'][test + ' Improvement'] = 'N/A';
+	                          tableObject[experiment]['$overall'][test + calculation] = 'N/A';
+	                        }
 
-                          // format table values
-                          if ( isNaN(tableObject[experiment][variant][test]) ) {
-                            $.noop();
-                          }
-                          else {
-                            if (test == 'Average Checkout Value') {
-                              tableObject[experiment][variant][test] = '$' + tableObject[experiment][variant][test].toFixed(2);
-                            }
-                            else {
-                              tableObject[experiment][variant][test] = (tableObject[experiment][variant][test]*100).toFixed(2) + '%';
-                            }
-                          }
-                        }
-                      }
+	                        // format table values
+	                        if ( isNaN(tableObject[experiment][variant][test]) ) {
+	                          $.noop();
+	                        }
+	                        else {
+	                          if (test == 'Average Checkout Value') {
+	                            tableObject[experiment][variant][test] = '$' + tableObject[experiment][variant][test].toFixed(2);
+	                          }
+	                          else {
+	                            tableObject[experiment][variant][test] = (tableObject[experiment][variant][test]*100).toFixed(2) + '%';
+	                          }
+	                        }
+	                      }
+	                  	}
+	                  	else {
+	                  		tableObject[experiment] = {'Error': {'Message': 'Baseline is not set and/or "off" is not a valid basline'}}
+	                  	}
+
                     }
 
                     // append table to experiment div
