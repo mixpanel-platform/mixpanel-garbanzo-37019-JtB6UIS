@@ -115,6 +115,7 @@
             // find returning customer conversion rates for each experiment's variants
             var returnParameters = {
               segment: experimentList[experiment],
+              length: 1,
               from: dateSelect.from,
               to: dateSelect.to
             }
@@ -128,6 +129,7 @@
             // find new customer conversion rates for each experiment's variants
             var newParameters = {
               segment: experimentList[experiment],
+              length: 1,
               from: dateSelect.from,
               to: dateSelect.to
             }
